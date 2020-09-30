@@ -1,4 +1,5 @@
 FROM golang:1.13.13-alpine3.12 as BUILDER
+RUN apk add gcc libc-dev make
 WORKDIR /workspace
 COPY . .
 RUN make cmd/kured/kured
