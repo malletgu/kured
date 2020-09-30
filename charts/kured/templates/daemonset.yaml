@@ -72,16 +72,16 @@ spec:
           {{- if .Values.configuration.rebootSentinel }}
             - --reboot-sentinel={{ .Values.configuration.rebootSentinel }}
           {{- end }}
-          {{ - if .Values.configuration.rebootCommand }}
+          {{- if .Values.configuration.rebootCommand }}
             - --reboot-command={{ .Values.configuration.rebootCommand }}
           {{- end }}
           {{- if .Values.configuration.terminateSentinel }}
             - --terminate-sentinel={{ .Values.configuration.terminateSentinel }}
           {{- end }}
-          {{ - if .Values.configuration.terminateCommand }}
+          {{- if .Values.configuration.terminateCommand }}
             - --terminate-command={{ .Values.configuration.terminateCommand }}
           {{- end }}
-          {{ - if .Values.configuration.awsTargetGroupArn }}
+          {{- if .Values.configuration.awsTargetGroupArn }}
             - --target-group-arn={{ .Values.configuration.awsTargetGroupArn }}
           {{- end }}
           {{- if .Values.configuration.slackChannel }}
