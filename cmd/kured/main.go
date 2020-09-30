@@ -36,6 +36,7 @@ var (
 	prometheusURL  string
 	alertFilter    *regexp.Regexp
 	rebootSentinel string
+	rebootCommand  string
 	slackHookURL   string
 	slackUsername  string
 	slackChannel   string
@@ -78,8 +79,11 @@ func main() {
 		"Prometheus instance to probe for active alerts")
 	rootCmd.PersistentFlags().Var(&regexpValue{&alertFilter}, "alert-filter-regexp",
 		"alert names to ignore when checking for active alerts")
+
 	rootCmd.PersistentFlags().StringVar(&rebootSentinel, "reboot-sentinel", "/var/run/reboot-required",
 		"path to file whose existence signals need to reboot")
+	rootCmd.PersistentFlags().StringVar(&rebootCommand, "reboot-command", "reboot",
+		"command to execute for the reboot")
 
 	rootCmd.PersistentFlags().StringVar(&slackHookURL, "slack-hook-url", "",
 		"slack hook URL for reboot notfications")
@@ -267,7 +271,7 @@ func commandReboot(nodeID string) {
 	}
 
 	// Relies on hostPID:true and privileged:true to enter host mount space
-	rebootCmd := newCommand("/usr/bin/nsenter", "-m/proc/1/ns/mnt", "/bin/systemctl", "reboot")
+	rebootCmd := newCommand("/usr/bin/nsenter", "-m/proc/1/ns/mnt", "/bin/systemctl", rebootCommand)
 	if err := rebootCmd.Run(); err != nil {
 		log.Fatalf("Error invoking reboot command: %v", err)
 	}

@@ -90,6 +90,7 @@ Flags:
       --prometheus-url string               Prometheus instance to probe for active alerts
       --reboot-days strings                 only reboot on these days (default [su,mo,tu,we,th,fr,sa])
       --reboot-sentinel string              path to file whose existence signals need to reboot (default "/var/run/reboot-required")
+      --reboot-command                      command to execute for the reboot
       --slack-channel string                slack channel for reboot notfications
       --slack-hook-url string               slack hook URL for reboot notfications
       --slack-username string               slack username for reboot notfications (default "kured")
