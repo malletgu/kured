@@ -403,7 +403,6 @@ func rebootAsRequired(nodeID string, window *timewindow.TimeWindow, TTL time.Dur
 						log.Warnf("Cannot execute termination due to error finding the aws instance id")
 					}
 					cloud.DeregisterTarget(*instanceId, awsTargetGroupArn)
-					time.Sleep(60 * time.Second)
 				}
 
 				switch action {

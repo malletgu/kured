@@ -96,7 +96,35 @@ func DeregisterTarget(instanceId string, targetGroupArn string) error {
 		}
 	}
 
+	wait_input := &elbv2.DescribeTargetHealthInput{
+		TargetGroupArn: &targetGroupArn,
+		Targets: []*elbv2.TargetDescription{
+			{
+				Id: &instanceId,
+			},
+		},
+	}
 	fmt.Println(result)
+	log.Info("Waiting for target deregistration")
+
+	err = svc.WaitUntilTargetDeregistered(wait_input)
+	if err != nil {
+		if aerr, ok := err.(awserr.Error); ok {
+			switch aerr.Code() {
+			case elbv2.ErrCodeTargetGroupNotFoundException:
+				fmt.Println(elbv2.ErrCodeTargetGroupNotFoundException, aerr.Error())
+			case elbv2.ErrCodeInvalidTargetException:
+				fmt.Println(elbv2.ErrCodeInvalidTargetException, aerr.Error())
+			default:
+				fmt.Println(aerr.Error())
+			}
+		} else {
+			fmt.Println(err.Error())
+		}
+	} else {
+		log.Info("Target deregistration complete")
+	}
+
 	return nil
 }
 
