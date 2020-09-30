@@ -36,6 +36,10 @@ configuration:
   startTime: ""             # only reboot after this time of day (default "0:00")
   timeZone: ""              # time-zone to use (valid zones from "time" golang package)
 
+  terminateSentinel: ""
+  terminateCommand: ""
+  awsTargetGroupArn: ""
+
 rbac:
   create: true
 

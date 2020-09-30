@@ -19,6 +19,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/weaveworks/kured/pkg/alerts"
+	"github.com/weaveworks/kured/pkg/cloud"
 	"github.com/weaveworks/kured/pkg/daemonsetlock"
 	"github.com/weaveworks/kured/pkg/delaytick"
 	"github.com/weaveworks/kured/pkg/notifications/slack"
@@ -29,18 +30,22 @@ var (
 	version = "unreleased"
 
 	// Command line flags
-	period         time.Duration
-	dsNamespace    string
-	dsName         string
-	lockAnnotation string
-	prometheusURL  string
-	alertFilter    *regexp.Regexp
-	rebootSentinel string
-	rebootCommand  string
-	slackHookURL   string
-	slackUsername  string
-	slackChannel   string
-	podSelectors   []string
+	period            time.Duration
+	dsNamespace       string
+	dsName            string
+	lockAnnotation    string
+	prometheusURL     string
+	alertFilter       *regexp.Regexp
+	rebootSentinel    string
+	rebootCommand     string
+	terminateSentinel string
+	terminateCommand  string
+	slackHookURL      string
+	slackUsername     string
+	slackChannel      string
+	podSelectors      []string
+
+	awsTargetGroupArn    string
 
 	rebootDays  []string
 	rebootStart string
@@ -85,6 +90,16 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&rebootCommand, "reboot-command", "reboot",
 		"command to execute for the reboot")
 
+	rootCmd.PersistentFlags().StringVar(&terminateSentinel, "terminate-sentinel", "/var/run/terminate-required",
+		"path to file whose existence signals need to terminate")
+	rootCmd.PersistentFlags().StringVar(&terminateCommand, "terminate-command", "shutdown",
+		"command to execute for the terminate, note that the lock will be released prior to this instance being terminated." +
+		"This functionality requires a valid service account with the right to terminate instances")
+
+	rootCmd.PersistentFlags().StringVar(&awsTargetGroupArn, "target-group-arn", "",
+		"enable removing the instance from aws target group prior to restart and re-adding it after." +
+		"This functionality requires a valid service account with the right to edit that target group")
+
 	rootCmd.PersistentFlags().StringVar(&slackHookURL, "slack-hook-url", "",
 		"slack hook URL for reboot notfications")
 	rootCmd.PersistentFlags().StringVar(&slackUsername, "slack-username", "kured",
@@ -113,8 +128,13 @@ func main() {
 }
 
 // newCommand creates a new Command with stdout/stderr wired to our standard logger
-func newCommand(name string, arg ...string) *exec.Cmd {
-	cmd := exec.Command(name, arg...)
+func newCommand(executeAsHost bool, name string, args ...string) *exec.Cmd {
+	var cmd *exec.Cmd
+	if executeAsHost {
+		cmd = exec.Command("/usr/bin/nsenter", append([]string{"-m/proc/1/ns/mnt", name}, args...)...)
+	} else {
+		cmd = exec.Command(name, args...)
+	}
 
 	cmd.Stdout = log.NewEntry(log.StandardLogger()).
 		WithField("cmd", cmd.Args[0]).
@@ -129,9 +149,9 @@ func newCommand(name string, arg ...string) *exec.Cmd {
 	return cmd
 }
 
-func sentinelExists() bool {
+func sentinelExists(sentinel string) bool {
 	// Relies on hostPID:true and privileged:true to enter host mount space
-	sentinelCmd := newCommand("/usr/bin/nsenter", "-m/proc/1/ns/mnt", "--", "/usr/bin/test", "-f", rebootSentinel)
+	sentinelCmd := newCommand(true, "--", "/usr/bin/test", "-f", sentinel)
 	if err := sentinelCmd.Run(); err != nil {
 		switch err := err.(type) {
 		case *exec.ExitError:
@@ -150,11 +170,21 @@ func sentinelExists() bool {
 }
 
 func rebootRequired() bool {
-	if sentinelExists() {
+	if sentinelExists(rebootSentinel) {
 		log.Infof("Reboot required")
 		return true
 	} else {
 		log.Infof("Reboot not required")
+		return false
+	}
+}
+
+func terminateRequired() bool {
+	if sentinelExists(terminateSentinel) {
+		log.Infof("Terminate required")
+		return true
+	} else {
+		log.Infof("Terminate not required")
 		return false
 	}
 }
@@ -245,7 +275,7 @@ func drain(nodeID string) {
 		}
 	}
 
-	drainCmd := newCommand("/usr/bin/kubectl", "drain",
+	drainCmd := newCommand(false, "/usr/bin/kubectl", "drain",
 		"--ignore-daemonsets", "--delete-local-data", "--force", nodeID)
 
 	if err := drainCmd.Run(); err != nil {
@@ -255,14 +285,14 @@ func drain(nodeID string) {
 
 func uncordon(nodeID string) {
 	log.Infof("Uncordoning node %s", nodeID)
-	uncordonCmd := newCommand("/usr/bin/kubectl", "uncordon", nodeID)
+	uncordonCmd := newCommand(false, "/usr/bin/kubectl", "uncordon", nodeID)
 	if err := uncordonCmd.Run(); err != nil {
 		log.Fatalf("Error invoking uncordon command: %v", err)
 	}
 }
 
-func commandReboot(nodeID string) {
-	log.Infof("Commanding reboot for node: %s", nodeID)
+func executeCommand(nodeID string, action Action, command string) {
+	log.Infof("Node %s Commanding %s: %s", nodeID, action, command)
 
 	if slackHookURL != "" {
 		if err := slack.NotifyReboot(slackHookURL, slackUsername, slackChannel, nodeID); err != nil {
@@ -270,16 +300,31 @@ func commandReboot(nodeID string) {
 		}
 	}
 
-	// Relies on hostPID:true and privileged:true to enter host mount space
-	rebootCmd := newCommand("/usr/bin/nsenter", "-m/proc/1/ns/mnt", "/bin/systemctl", rebootCommand)
-	if err := rebootCmd.Run(); err != nil {
-		log.Fatalf("Error invoking reboot command: %v", err)
+	switch action {
+	case Terminate:
+		instanceId, err := cloud.GetInstanceIdFromNodeName(nodeID)
+		if err != nil {
+			log.Warnf("Cannot execute termination due to error finding the aws instance id")
+		}
+
+		// Terminate itself, commands aren't reliable past this point
+		cloud.TerminateInstance(instanceId)
+	case Restart:
+		// Relies on hostPID:true and privileged:true to enter host mount space
+		// Could be changed to try to use AWS session, this would reduce the amount of privilege for the pod
+		// as we could as well mount the flags as a read only folder
+		rebootCmd := newCommand(true, "/usr/bin/nsenter", "-m/proc/1/ns/mnt", "/bin/systemctl", command)
+		if err := rebootCmd.Run(); err != nil {
+			log.Fatalf("Node %v, error invoking %s command %s: %v", nodeID, action, command, err)
+		}
 	}
 }
 
 func maintainRebootRequiredMetric(nodeID string) {
 	for {
-		if sentinelExists() {
+		if terminateRequired() {
+			rebootRequiredGauge.WithLabelValues(nodeID).Set(2)
+		} else if rebootRequired() {
 			rebootRequiredGauge.WithLabelValues(nodeID).Set(1)
 		} else {
 			rebootRequiredGauge.WithLabelValues(nodeID).Set(0)
@@ -292,6 +337,14 @@ func maintainRebootRequiredMetric(nodeID string) {
 type nodeMeta struct {
 	Unschedulable bool `json:"unschedulable"`
 }
+
+type Action string
+
+const (
+	Restart   Action = "restart"
+	Terminate Action = "terminate"
+	None      Action = "none"
+)
 
 func rebootAsRequired(nodeID string, window *timewindow.TimeWindow, TTL time.Duration) {
 	config, err := rest.InClusterConfig()
@@ -312,12 +365,28 @@ func rebootAsRequired(nodeID string, window *timewindow.TimeWindow, TTL time.Dur
 			uncordon(nodeID)
 		}
 		release(lock)
+
+		if awsTargetGroupArn != "" {
+			instanceId, err := cloud.GetInstanceIdFromNodeName(nodeID)
+			if err != nil {
+				log.Warnf("Cannot execute termination due to error finding the aws instance id")
+			}
+			cloud.RegisterTarget(*instanceId, awsTargetGroupArn)
+		}
 	}
 
 	source := rand.NewSource(time.Now().UnixNano())
 	tick := delaytick.New(source, period)
 	for _ = range tick {
-		if window.Contains(time.Now()) && rebootRequired() && !rebootBlocked(client, nodeID) {
+
+		var action = None
+		if rebootRequired() {
+			action = Restart
+		} else if terminateRequired() {
+			action = Terminate
+		}
+
+		if window.Contains(time.Now()) && action != None && !rebootBlocked(client, nodeID) {
 			node, err := client.CoreV1().Nodes().Get(context.TODO(), nodeID, metav1.GetOptions{})
 			if err != nil {
 				log.Fatal(err)
@@ -328,7 +397,21 @@ func rebootAsRequired(nodeID string, window *timewindow.TimeWindow, TTL time.Dur
 				if !nodeMeta.Unschedulable {
 					drain(nodeID)
 				}
-				commandReboot(nodeID)
+				if awsTargetGroupArn != "" {
+					instanceId, err := cloud.GetInstanceIdFromNodeName(nodeID)
+					if err != nil {
+						log.Warnf("Cannot execute termination due to error finding the aws instance id")
+					}
+					cloud.DeregisterTarget(*instanceId, awsTargetGroupArn)
+				}
+
+				switch action {
+				case Restart:
+					executeCommand(nodeID, action, rebootCommand)
+				case Terminate:
+					release(lock)
+					executeCommand(nodeID, action, terminateCommand)
+				}
 				for {
 					log.Infof("Waiting for reboot")
 					time.Sleep(time.Minute)
