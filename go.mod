@@ -3,7 +3,7 @@ module github.com/weaveworks/kured
 go 1.13
 
 require (
-	github.com/aws/aws-sdk-go v1.34.34
+	github.com/aws/aws-sdk-go v1.37.20
 	github.com/googleapis/gnostic v0.2.0 // indirect
 	github.com/inconshreveable/mousetrap v1.0.0 // indirect
 	github.com/prometheus/client_golang v0.0.0-20181230203121-fb3d5cb2ad57
